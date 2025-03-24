@@ -1,0 +1,200 @@
+version: '3.8'
+
+services:
+  # Main API service
+  streaming-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eino-streaming-service:latest
+    container_name: eino-streaming-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - .:/app
+      - ./storage:/app/storage
+    ports:
+      - "8000:8000"
+    environment:
+      - DEV_MODE=true
+      - DJANGO_API_URL=http://django-backend:8080/api/v2
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-super-secret-key-change-in-production}
+      - RAW_VIDEOS_BUCKET=eino-raw-videos
+      - PROCESSED_VIDEOS_BUCKET=eino-processed-videos
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - FFMPEG_THREADS=4
+    depends_on:
+      - redis
+      - django-backend
+    networks:
+      - eino-network
+
+  # Transcoding worker
+  transcoding-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eino-streaming-service:latest
+    container_name: eino-transcoding-worker
+    command: python -m workers.transcoding_worker
+    volumes:
+      - .:/app
+      - ./storage:/app/storage
+    environment:
+      - DEV_MODE=true
+      - DJANGO_API_URL=http://django-backend:8080/api/v2
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-super-secret-key-change-in-production}
+      - RAW_VIDEOS_BUCKET=eino-raw-videos
+      - PROCESSED_VIDEOS_BUCKET=eino-processed-videos
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - FFMPEG_THREADS=4
+    depends_on:
+      - redis
+      - streaming-api
+    networks:
+      - eino-network
+
+  # Chunk worker
+  chunk-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eino-streaming-service:latest
+    container_name: eino-chunk-worker
+    command: python -m workers.chunk_worker
+    volumes:
+      - .:/app
+      - ./storage:/app/storage
+    environment:
+      - DEV_MODE=true
+      - DJANGO_API_URL=http://django-backend:8080/api/v2
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-super-secret-key-change-in-production}
+      - RAW_VIDEOS_BUCKET=eino-raw-videos
+      - PROCESSED_VIDEOS_BUCKET=eino-processed-videos
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+    depends_on:
+      - redis
+      - streaming-api
+    networks:
+      - eino-network
+
+  # Manifest worker
+  manifest-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eino-streaming-service:latest
+    container_name: eino-manifest-worker
+    command: python -m workers.manifest_worker
+    volumes:
+      - .:/app
+      - ./storage:/app/storage
+    environment:
+      - DEV_MODE=true
+      - DJANGO_API_URL=http://django-backend:8080/api/v2
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-super-secret-key-change-in-production}
+      - RAW_VIDEOS_BUCKET=eino-raw-videos
+      - PROCESSED_VIDEOS_BUCKET=eino-processed-videos
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+    depends_on:
+      - redis
+      - streaming-api
+    networks:
+      - eino-network
+
+  # Cleanup worker (runs periodically)
+  cleanup-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eino-streaming-service:latest
+    container_name: eino-cleanup-worker
+    command: python -m workers.cleanup_worker
+    volumes:
+      - .:/app
+      - ./storage:/app/storage
+    environment:
+      - DEV_MODE=true
+      - DJANGO_API_URL=http://django-backend:8080/api/v2
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-super-secret-key-change-in-production}
+      - RAW_VIDEOS_BUCKET=eino-raw-videos
+      - PROCESSED_VIDEOS_BUCKET=eino-processed-videos
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+    depends_on:
+      - redis
+      - streaming-api
+    networks:
+      - eino-network
+
+  # Redis for message queue and caching
+  redis:
+    image: redis:6.2-alpine
+    container_name: eino-streaming-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - eino-network
+
+  # Mock Django backend for development
+  django-backend:
+    image: python:3.9-slim
+    container_name: eino-mock-django
+    command: python -m http.server 8080
+    volumes:
+      - ./mock-django:/app
+    working_dir: /app
+    ports:
+      - "8080:8080"
+    networks:
+      - eino-network
+
+  # FFmpeg worker container with GPU support (optional)
+  # Uncomment if you have NVIDIA GPU and want to use hardware acceleration
+  # ffmpeg-gpu:
+  #   image: jrottenberg/ffmpeg:4.4-nvidia
+  #   container_name: eino-ffmpeg-gpu
+  #   volumes:
+  #     - ./storage:/tmp/workdir
+  #   environment:
+  #     - NVIDIA_VISIBLE_DEVICES=all
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             capabilities: [gpu]
+  #   networks:
+  #     - eino-network
+  
+  # Local development tools
+  dev-tools:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: eino-streaming-dev:latest
+    container_name: eino-streaming-dev
+    volumes:
+      - .:/app
+      - ./storage:/app/storage
+    networks:
+      - eino-network
+    command: tail -f /dev/null  # Keep container running
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  eino-network:
+    driver: bridge

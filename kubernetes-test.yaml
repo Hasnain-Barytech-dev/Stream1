@@ -1,0 +1,322 @@
+# Testing environment Kubernetes configuration for EINO Streaming Service
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eino-streaming-test
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: streaming-config
+  namespace: eino-streaming-test
+data:
+  DEV_MODE: "false"
+  DJANGO_API_URL: "https://test-api.eino.world/api/v2"
+  RAW_VIDEOS_BUCKET: "eino-raw-videos-test"
+  PROCESSED_VIDEOS_BUCKET: "eino-processed-videos-test"
+  REDIS_HOST: "redis.eino-streaming-test.svc.cluster.local"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  FFMPEG_THREADS: "4"
+  HLS_SEGMENT_DURATION: "6"
+  DASH_SEGMENT_DURATION: "4"
+  BACKEND_CORS_ORIGINS: "https://test.eino.world,https://test-api.eino.world"
+  GCP_PROJECT_ID: "eino-streaming-test"
+  GCP_REGION: "us-central1"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: streaming-secrets
+  namespace: eino-streaming-test
+type: Opaque
+data:
+  JWT_SECRET_KEY: "dGVzdC1zZWNyZXQta2V5LWZvci10ZXN0aW5nLWVudmlyb25tZW50" # base64 encoded test key
+  REDIS_PASSWORD: "dGVzdC1yZWRpcy1wYXNzd29yZA==" # base64 encoded test redis password
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: streaming-api
+  namespace: eino-streaming-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: streaming-api
+  template:
+    metadata:
+      labels:
+        app: streaming-api
+    spec:
+      containers:
+      - name: api
+        image: gcr.io/eino-project/streaming-service:test
+        imagePullPolicy: Always
+        command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+        ports:
+        - containerPort: 8000
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+        envFrom:
+        - configMapRef:
+            name: streaming-config
+        - secretRef:
+            name: streaming-secrets
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transcoding-worker
+  namespace: eino-streaming-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: transcoding-worker
+  template:
+    metadata:
+      labels:
+        app: transcoding-worker
+    spec:
+      containers:
+      - name: worker
+        image: gcr.io/eino-project/streaming-service:test
+        imagePullPolicy: Always
+        command: ["python", "-m", "workers.transcoding_worker"]
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        envFrom:
+        - configMapRef:
+            name: streaming-config
+        - secretRef:
+            name: streaming-secrets
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chunk-worker
+  namespace: eino-streaming-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: chunk-worker
+  template:
+    metadata:
+      labels:
+        app: chunk-worker
+    spec:
+      containers:
+      - name: worker
+        image: gcr.io/eino-project/streaming-service:test
+        imagePullPolicy: Always
+        command: ["python", "-m", "workers.chunk_worker"]
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+        envFrom:
+        - configMapRef:
+            name: streaming-config
+        - secretRef:
+            name: streaming-secrets
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manifest-worker
+  namespace: eino-streaming-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: manifest-worker
+  template:
+    metadata:
+      labels:
+        app: manifest-worker
+    spec:
+      containers:
+      - name: worker
+        image: gcr.io/eino-project/streaming-service:test
+        imagePullPolicy: Always
+        command: ["python", "-m", "workers.manifest_worker"]
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+        envFrom:
+        - configMapRef:
+            name: streaming-config
+        - secretRef:
+            name: streaming-secrets
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: eino-streaming-test
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:6.2-alpine
+        command: ["redis-server", "--requirepass", "$(REDIS_PASSWORD)"]
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        envFrom:
+        - secretRef:
+            name: streaming-secrets
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: streaming-api
+  namespace: eino-streaming-test
+spec:
+  selector:
+    app: streaming-api
+  ports:
+  - port: 80
+    targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: eino-streaming-test
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: streaming-ingress
+  namespace: eino-streaming-test
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.allow-http: "false"
+spec:
+  rules:
+  - host: test-streaming.eino.world
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: streaming-api
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - test-streaming.eino.world
+    secretName: streaming-tls-cert
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-worker
+  namespace: eino-streaming-test
+spec:
+  schedule: "0 2 * * *"  # Run daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: cleanup
+            image: gcr.io/eino-project/streaming-service:test
+            command: ["python", "-m", "workers.cleanup_worker"]
+            envFrom:
+            - configMapRef:
+                name: streaming-config
+            - secretRef:
+                name: streaming-secrets
+          restartPolicy: OnFailure

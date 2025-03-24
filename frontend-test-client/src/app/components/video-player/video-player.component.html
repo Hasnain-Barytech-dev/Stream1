@@ -1,0 +1,25 @@
+<!-- frontend-test-client/src/app/components/video-player/video-player.component.html -->
+<div class="video-player-container">
+  <div *ngIf="loading" class="loading">
+    Loading video...
+  </div>
+  
+  <div *ngIf="error" class="error">
+    {{ error }}
+  </div>
+  
+  <div *ngIf="!loading && !error" class="player-wrapper">
+    <h2 *ngIf="video">{{ video.title }}</h2>
+    <video #videoPlayer controls width="100%" poster="{{ video?.thumbnail_url }}"></video>
+    
+    <div class="video-info" *ngIf="video">
+      <p *ngIf="video.description">{{ video.description }}</p>
+      <div class="metadata">
+        <div>Duration: {{ video.duration | date:'mm:ss' }}</div>
+        <div>Resolution: {{ video.width }}x{{ video.height }}</div>
+        <div>Format: {{ video.format }}</div>
+        <div>Size: {{ video.size / 1024 / 1024 | number:'1.1-2' }} MB</div>
+      </div>
+    </div>
+  </div>
+</div>

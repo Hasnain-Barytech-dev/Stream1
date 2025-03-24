@@ -1,0 +1,42 @@
+<!-- frontend-test-client/src/app/components/video-list/video-list.component.html -->
+<div class="video-list-container">
+  <h2>{{ companyId ? 'Company Videos' : 'My Videos' }}</h2>
+  
+  <div *ngIf="loading && videos.length === 0" class="loading">
+    Loading videos...
+  </div>
+  
+  <div *ngIf="error" class="error">
+    {{ error }}
+  </div>
+  
+  <div class="videos-grid" *ngIf="videos.length > 0">
+    <div class="video-card" *ngFor="let video of videos">
+      <div class="thumbnail" [routerLink]="['/watch', video.id]">
+        <img [src]="video.thumbnail_url || 'assets/placeholder-thumbnail.jpg'" alt="{{ video.title }}">
+        <div class="duration" *ngIf="video.duration">{{ video.duration | date:'mm:ss' }}</div>
+        <div class="status-badge" [ngClass]="video.status">{{ video.status }}</div>
+      </div>
+      
+      <div class="video-info">
+        <h3 [routerLink]="['/watch', video.id]">{{ video.title }}</h3>
+        <p class="date">{{ video.created_at | date }}</p>
+        
+        <div class="actions">
+          <button *ngIf="video.status === 'ready'" [routerLink]="['/watch', video.id]">Watch</button>
+          <button *ngIf="video.status === 'failed'" (click)="retryProcessing(video.id)">Retry</button>
+          <button class="delete" (click)="deleteVideo(video.id)">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <div class="load-more" *ngIf="hasMoreVideos && !loading">
+    <button (click)="loadMore()">Load More</button>
+  </div>
+  
+  <div *ngIf="videos.length === 0 && !loading" class="empty-state">
+    <p>No videos found. Upload your first video to get started!</p>
+    <button routerLink="/upload">Upload Video</button>
+  </div>
+</div>

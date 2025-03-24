@@ -1,0 +1,42 @@
+<!-- frontend-test-client/src/app/components/upload/upload.component.html -->
+<div class="upload-container">
+  <h2>Upload Video</h2>
+  
+  <form [formGroup]="uploadForm" (ngSubmit)="onSubmit()">
+    <div class="form-group">
+      <label for="title">Title</label>
+      <input type="text" id="title" formControlName="title" required>
+      <div class="error" *ngIf="uploadForm.get('title')?.invalid && uploadForm.get('title')?.touched">
+        Title is required
+      </div>
+    </div>
+    
+    <div class="form-group">
+      <label for="description">Description</label>
+      <textarea id="description" formControlName="description" rows="3"></textarea>
+    </div>
+    
+    <div class="form-group">
+      <label for="file">Select Video</label>
+      <input type="file" id="file" (change)="onFileSelected($event)" accept="video/*" [disabled]="uploadInProgress">
+      <div class="selected-file" *ngIf="selectedFile">
+        Selected: {{ selectedFile.name }} ({{ (selectedFile.size / 1024 / 1024).toFixed(2) }} MB)
+      </div>
+    </div>
+    
+    <div class="progress-container" *ngIf="uploadInProgress">
+      <div class="progress-bar" [style.width.%]="uploadProgress">
+        {{ uploadProgress }}%
+      </div>
+    </div>
+    
+    <div class="error-message" *ngIf="uploadError">
+      {{ uploadError }}
+    </div>
+    
+    <div class="actions">
+      <button type="submit" [disabled]="!uploadForm.valid || !selectedFile || uploadInProgress">Upload</button>
+      <button type="button" *ngIf="uploadInProgress" (click)="cancelUpload()">Cancel</button>
+    </div>
+  </form>
+</div>

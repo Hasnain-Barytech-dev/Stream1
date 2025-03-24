@@ -1,0 +1,657 @@
+# Production environment Kubernetes configuration for EINO Streaming Service
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eino-streaming
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: streaming-config
+  namespace: eino-streaming
+data:
+  DEV_MODE: "false"
+  DJANGO_API_URL: "https://api.eino.world/api/v2"
+  RAW_VIDEOS_BUCKET: "eino-raw-videos"
+  PROCESSED_VIDEOS_BUCKET: "eino-processed-videos"
+  REDIS_HOST: "redis.eino-streaming.svc.cluster.local"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  FFMPEG_THREADS: "4"
+  HLS_SEGMENT_DURATION: "6"
+  DASH_SEGMENT_DURATION: "4"
+  BACKEND_CORS_ORIGINS: "https://app.eino.world,https://api.eino.world,https://support.eino.world"
+  GCP_PROJECT_ID: "eino-streaming"
+  GCP_REGION: "us-central1"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: streaming-secrets
+  namespace: eino-streaming
+type: Opaque
+data:
+  # These values would be replaced by actual secrets in a CI/CD pipeline
+  JWT_SECRET_KEY: "${JWT_SECRET_KEY_BASE64}"
+  REDIS_PASSWORD: "${REDIS_PASSWORD_BASE64}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: streaming-api
+  namespace: eino-streaming
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: streaming-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: streaming-api
+    spec:
+      containers:
+      - name: api
+        image: gcr.io/eino-project/streaming-service:${IMAGE_TAG}
+        imagePullPolicy: Always
+        command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+        ports:
+        - containerPort: 8000
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        envFrom:
+        - configMapRef:
+            name: streaming-config
+        - secretRef:
+            name: streaming-secrets
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: streaming-api-hpa
+  namespace: eino-streaming
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: streaming-api
+  minReplicas: 4
+  maxReplicas: 12
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transcoding-worker
+  namespace: eino-streaming
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: transcoding-worker
+  template:
+    metadata:
+      labels:
+        app: transcoding-worker
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - transcoding-worker
+              topologyKey: "kubernetes.io/hostname"
+      containers:
+      - name: worker
+        image: gcr.io/eino-project/streaming-service:${IMAGE_TAG}
+        imagePullPolicy: Always
+        command: ["python", "-m", "workers.transcoding_worker"]
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+        envFrom:
+        - configMapRef:
+            name: streaming-config
+        - secretRef:
+            name: streaming-secrets
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: tmp-volume
+        emptyDir:
+          sizeLimit: 10Gi
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: transcoding-worker-hpa
+  namespace: eino-streaming
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: transcoding-worker
+  minReplicas: 4
+  maxReplicas: 16
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chunk-worker
+  namespace: eino-streaming
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: chunk-worker
+  template:
+    metadata:
+      labels:
+        app: chunk-worker
+    spec:
+      containers:
+      - name: worker
+        image: gcr.io/eino-project/streaming-service:${IMAGE_TAG}
+        imagePullPolicy: Always
+        command: ["python", "-m", "workers.chunk_worker"]
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        envFrom:
+        - configMapRef:
+            name: streaming-config
+        - secretRef:
+            name: streaming-secrets
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: chunk-worker-hpa
+  namespace: eino-streaming
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: chunk-worker
+  minReplicas: 4
+  maxReplicas: 12
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manifest-worker
+  namespace: eino-streaming
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: manifest-worker
+  template:
+    metadata:
+      labels:
+        app: manifest-worker
+    spec:
+      containers:
+      - name: worker
+        image: gcr.io/eino-project/streaming-service:${IMAGE_TAG}
+        imagePullPolicy: Always
+        command: ["python", "-m", "workers.manifest_worker"]
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        envFrom:
+        - configMapRef:
+            name: streaming-config
+        - secretRef:
+            name: streaming-secrets
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: manifest-worker-hpa
+  namespace: eino-streaming
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: manifest-worker
+  minReplicas: 4
+  maxReplicas: 12
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: eino-streaming
+spec:
+  serviceName: redis
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - redis
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+      - name: redis
+        image: redis:6.2-alpine
+        command: 
+        - /bin/sh
+        - -c
+        - |
+          if [ "$HOSTNAME" = "redis-0" ]; then
+            redis-server --requirepass $(REDIS_PASSWORD)
+          else
+            redis-server --slaveof redis-0.redis 6379 --requirepass $(REDIS_PASSWORD)
+          fi
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "1"
+        envFrom:
+        - secretRef:
+            name: streaming-secrets
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 15
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 50Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: streaming-api
+  namespace: eino-streaming
+spec:
+  selector:
+    app: streaming-api
+  ports:
+  - port: 80
+    targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: eino-streaming
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  clusterIP: None
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-read
+  namespace: eino-streaming
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: streaming-ingress
+  namespace: eino-streaming
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.allow-http: "false"
+    networking.gke.io/managed-certificates: "streaming-cert"
+    networking.gke.io/v1beta1.FrontendConfig: "streaming-frontend-config"
+spec:
+  rules:
+  - host: streaming.eino.world
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: streaming-api
+            port:
+              number: 80
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: streaming-frontend-config
+  namespace: eino-streaming
+spec:
+  redirectToHttps:
+    enabled: true
+    responseCodeName: MOVED_PERMANENTLY_DEFAULT
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: streaming-cert
+  namespace: eino-streaming
+spec:
+  domains:
+  - streaming.eino.world
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-worker
+  namespace: eino-streaming
+spec:
+  schedule: "0 1 * * *"  # Run daily at 1 AM
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: cleanup
+            image: gcr.io/eino-project/streaming-service:${IMAGE_TAG}
+            command: ["python", "-m", "workers.cleanup_worker"]
+            resources:
+              requests:
+                memory: "2Gi"
+                cpu: "1"
+              limits:
+                memory: "4Gi"
+                cpu: "2"
+            envFrom:
+            - configMapRef:
+                name: streaming-config
+            - secretRef:
+                name: streaming-secrets
+          restartPolicy: OnFailure
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: streaming-api-pdb
+  namespace: eino-streaming
+spec:
+  minAvailable: "75%"
+  selector:
+    matchLabels:
+      app: streaming-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: transcoding-worker-pdb
+  namespace: eino-streaming
+spec:
+  minAvailable: "50%"
+  selector:
+    matchLabels:
+      app: transcoding-worker
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  namespace: eino-streaming
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: redis
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: streaming-monitor
+  namespace: eino-streaming
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: streaming-api
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 15s
+  namespaceSelector:
+    matchNames:
+    - eino-streaming
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: streaming-alerts
+  namespace: eino-streaming
+  labels:
+    release: prometheus
+spec:
+  groups:
+  - name: streaming-service
+    rules:
+    - alert: HighApiLatency
+      expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service="streaming-api"}[5m])) by (le)) > 2
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High API latency"
+        description: "95th percentile of request latency is above 2 seconds for 5 minutes"
+    - alert: HighErrorRate
+      expr: sum(rate(http_requests_total{service="streaming-api",status=~"5.."}[5m])) / sum(rate(http_requests_total{service="streaming-api"}[5m])) > 0.05
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High error rate"
+        description: "Error rate is above 5% for 5 minutes"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-backup
+  namespace: eino-streaming
+spec:
+  schedule: "0 3 * * *"  # Daily at 3 AM
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: backup
+            image: gcr.io/eino-project/redis-backup:latest
+            command: ["/backup-script.sh"]
+            env:
+            - name: BACKUP_NAME
+              value: "redis-backup-$(date +%Y%m%d)"
+            - name: BACKUP_BUCKET
+              value: "eino-streaming-backups"
+            envFrom:
+            - secretRef:
+                name: streaming-secrets
+          restartPolicy: OnFailure
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-scrape-config
+  namespace: eino-streaming
+data:
+  prometheus.yml: |
+    scrape_configs:
+      - job_name: 'streaming-service'
+        metrics_path: '/metrics'
+        scrape_interval: 15s
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - eino-streaming
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: streaming-api
+            action: keep
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pods-list
+  namespace: eino-streaming
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: streaming-pods-list
+  namespace: eino-streaming
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: eino-streaming
+roleRef:
+  kind: Role
+  name: pods-list
+  apiGroup: rbac.authorization.k8s.io
